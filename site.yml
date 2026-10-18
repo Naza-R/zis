@@ -1,0 +1,202 @@
+---
+- name: Monitoring
+  hosts: nginx
+  become: true
+
+  vars:
+    alertmanager_version: "0.27.0"
+    alertmanager_arch: "amd64"
+    alertmanager_url: "https://github.com/prometheus/alertmanager/releases/download/v{{ alertmanager_version }}/alertmanager-{{ alertmanager_version }}.linux-{{ alertmanager_arch }}.tar.gz"
+    alertmanager_dir: "/etc/alertmanager"
+    telegram_bot_token: "PUT_BOT_TOKEN_HERE"
+    telegram_chat_id: "PUT_CHAT_ID_HERE"
+    zeek_repo_dist: "xUbuntu_22.04"
+    zeek_interface: "enp0s3"
+    prometheus_bind: "127.0.0.1"
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Base packages
+      ansible.builtin.apt:
+        name: [wget, curl, tar, gpg, ca-certificates, gnupg, lsb-release]
+        state: present
+
+    # ========== 3. Alertmanager ==========
+    - name: Download alertmanager archive
+      ansible.builtin.get_url:
+        url: "{{ alertmanager_url }}"
+        dest: "/tmp/alertmanager-{{ alertmanager_version }}.tar.gz"
+        mode: '0644'
+
+    - name: Unpack alertmanager
+      ansible.builtin.unarchive:
+        src: "/tmp/alertmanager-{{ alertmanager_version }}.tar.gz"
+        dest: /tmp/
+        remote_src: true
+        creates: "/tmp/alertmanager-{{ alertmanager_version }}.linux-{{ alertmanager_arch }}"
+
+    - name: Install alertmanager binaries
+      ansible.builtin.copy:
+        src: "/tmp/alertmanager-{{ alertmanager_version }}.linux-{{ alertmanager_arch }}/{{ item }}"
+        dest: "/usr/local/bin/{{ item }}"
+        mode: '0755'
+        remote_src: true
+      loop:
+        - alertmanager
+        - amtool
+
+    - name: Create /etc/alertmanager
+      ansible.builtin.file:
+        path: "{{ alertmanager_dir }}"
+        state: directory
+        mode: '0755'
+
+    - name: alertmanager.yml
+      ansible.builtin.template:
+        src: alertmanager.yml.j2
+        dest: "{{ alertmanager_dir }}/alertmanager.yml"
+        mode: '0640'
+      notify: restart alertmanager
+
+    - name: alertmanager.service
+      ansible.builtin.template:
+        src: alertmanager.service.j2
+        dest: /etc/systemd/system/alertmanager.service
+        mode: '0644'
+      notify:
+        - daemon-reload
+        - restart alertmanager
+
+    - name: Enable alertmanager
+      ansible.builtin.systemd:
+        name: alertmanager
+        enabled: true
+        state: started
+
+    # ========== 4+6. Prometheus configs ==========
+    - name: prometheus.yml
+      ansible.builtin.template:
+        src: prometheus.yml.j2
+        dest: /etc/prometheus/prometheus.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      notify: restart prometheus
+
+    - name: alert.rules.yml
+      ansible.builtin.template:
+        src: alert.rules.yml.j2
+        dest: /etc/prometheus/alert.rules.yml
+        owner: prometheus
+        group: prometheus
+        mode: '0644'
+      notify: restart prometheus
+
+    # ========== 5. Zeek ==========
+    - name: Zeek repo key
+      ansible.builtin.get_url:
+        url: "https://download.opensuse.org/repositories/security:/zeek/{{ zeek_repo_dist }}/Release.key"
+        dest: /tmp/zeek-release.key
+        mode: '0644'
+
+    - name: Dearmor zeek key
+      ansible.builtin.shell: |
+        gpg --dearmor < /tmp/zeek-release.key > /etc/apt/trusted.gpg.d/security_zeek.gpg
+      args:
+        creates: /etc/apt/trusted.gpg.d/security_zeek.gpg
+
+    - name: Zeek apt repo
+      ansible.builtin.apt_repository:
+        repo: "deb http://download.opensuse.org/repositories/security:/zeek/{{ zeek_repo_dist }}/ /"
+        filename: security_zeek
+        state: present
+        update_cache: true
+
+    - name: Install zeek
+      ansible.builtin.apt:
+        name: zeek-6.0
+        state: present
+
+    - name: zeek node.cfg (interface)
+      ansible.builtin.copy:
+        dest: /opt/zeek/etc/node.cfg
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [zeek]
+          type=standalone
+          host=localhost
+          interface={{ zeek_interface }}
+      notify: restart zeek
+
+    - name: Enable @load packages in local.zeek
+      ansible.builtin.lineinfile:
+        path: /opt/zeek/share/zeek/site/local.zeek
+        line: "@load packages"
+        state: present
+      notify: restart zeek
+
+    - name: Sed fix default cluster port
+      ansible.builtin.replace:
+        path: /opt/zeek/share/zeek/base/frameworks/cluster/main.zeek
+        regexp: '&default=0/unknown'
+        replace: '&default=1234/tcp'
+      notify: restart zeek
+
+    - name: Install zkg packages
+      ansible.builtin.command:
+        cmd: /opt/zeek/bin/zkg install ncsa/bro-simple-scan zeek-notice-telegram
+        creates: /opt/zeek/share/zeek/site/packages/__load__.zeek
+      environment:
+        PATH: "/opt/zeek/bin:/usr/local/bin:/usr/bin:/bin"
+        PREF: "/opt/zeek/"
+
+    - name: zeekctl install
+      ansible.builtin.command:
+        cmd: /opt/zeek/bin/zeekctl install
+        chdir: /opt/zeek/bin
+        creates: /opt/zeek/spool/zeek/.pid
+
+    - name: zeek.service
+      ansible.builtin.template:
+        src: zeek.service.j2
+        dest: /etc/systemd/system/zeek.service
+        mode: '0644'
+      notify:
+        - daemon-reload
+        - restart zeek
+
+    - name: Enable zeek
+      ansible.builtin.systemd:
+        name: zeek
+        enabled: true
+        state: started
+
+  handlers:
+    - name: daemon-reload
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    - name: restart alertmanager
+      ansible.builtin.systemd:
+        name: alertmanager
+        state: restarted
+        daemon_reload: true
+
+    - name: restart prometheus
+      ansible.builtin.systemd:
+        name: prometheus
+        state: restarted
+
+    - name: restart zeek
+      ansible.builtin.systemd:
+        name: zeek
+        state: restarted
+        daemon_reload: true
+
+

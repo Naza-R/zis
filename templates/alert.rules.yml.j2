@@ -1,0 +1,25 @@
+groups:
+- name: flood
+  rules:
+  - alert: HTTP_flood
+    expr: irate(nginx_http_requests_total[4s]) > 150
+    labels: 
+      severity: critical
+    annotations:
+      summary: "High HTTP reguest rate detected"
+- name: UDPFlood
+  rules:
+  - alert: UDPFlood
+    expr: irate(zeek_active_sessions{protocol="udp"}[9s]) > 6000
+    labels:
+      severity: critical
+    annotations:
+      summary: "High rate of UDP rate detected"
+- name: TCPFlood
+  rules:
+  - alert: TCPFlood
+    expr: irate(zeek_active_sessions{protocol="tcp"}[9s]) > 6000
+    labels:
+      severity: critical
+    annotations:
+      summary: "High rate of TCP rate detected"

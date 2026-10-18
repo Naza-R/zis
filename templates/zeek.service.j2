@@ -1,0 +1,12 @@
+[Unit]
+Description=zeek network analysis engine
+After=network-online.target
+Restart=on-failure
+[Service]
+Type=forking
+PIDFile=/opt/zeek/spool/zeek/.pid
+Environment="BROKER_METRICS_PORT=4242"
+ExecStart=/opt/zeek/bin/zeekctl start
+ExecStop=/opt/zeek/bin/zeekctl stop
+[Install]
+WantedBy=multi-user.target
